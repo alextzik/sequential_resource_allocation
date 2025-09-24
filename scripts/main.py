@@ -91,7 +91,7 @@ def conditional_gaussian(mu: np.ndarray, Sigma: np.ndarray, obs_idx: np.ndarray,
     return mu_cond, Sigma_cond
 
 
-def run_algorithm2(gh: GaussianHorizon, eps: float = 1e-6, seed: Optional[int] = None, simulate: bool = True, demands: Optional[np.ndarray] = None) -> dict:
+def run_algorithm2(gh: GaussianHorizon, eps: float = 1e-6, seed: Optional[int] = None, demands: Optional[np.ndarray] = None) -> dict:
     T = gh.T
     prices = gh.prices
     L = gh.L
@@ -124,15 +124,10 @@ def run_algorithm2(gh: GaussianHorizon, eps: float = 1e-6, seed: Optional[int] =
         # Realize demand
         if demands is not None:
             d_t = float(demands[t])
-        elif simulate:
-            if t == 0:
-                d_t = float(rng.normal(mu[0], np.sqrt(max(Sigma[0,0], 0.0))))
-            else:
-                # sample from conditional for the single next variable
-                mu1, Sig1 = conditional_gaussian(mu, Sigma, np.arange(t), realized[:t], np.array([t]))
-                d_t = float(rng.normal(mu1[0], np.sqrt(max(Sig1[0,0], 0.0))))
         else:
-            d_t = np.nan
+            # sample from conditional for the single next variable
+            mu1, Sig1 = conditional_gaussian(mu, Sigma, np.arange(t), realized[:t], np.array([t]))
+            d_t = float(rng.normal(mu1[0], np.sqrt(max(Sig1[0,0], 0.0))))
         realized[t] = d_t
 
         # Update conditioning sets
@@ -152,17 +147,41 @@ def run_algorithm2(gh: GaussianHorizon, eps: float = 1e-6, seed: Optional[int] =
     }
 
 
-def build_synthetic(T: int, seed: int = 0) -> GaussianHorizon:
+def run_baseline_static(gh: GaussianHorizon, eps: float = 1e-6) -> dict:
+    """Static baseline: solve the joint problem once using the marginal distributions
+    (unconditional) via Algorithm 1; no receding updates.
+    """
+    mu = gh.mu
+    sigma = np.sqrt(np.maximum(np.diag(gh.Sigma), 0.0))
+    allocations, nu = algorithm1_bisection(gh.prices, gh.L, mu, sigma, eps=eps)
+    return {"allocations": allocations, "nu": nu}
+
+
+def evaluate_policy(prices: np.ndarray, allocations: np.ndarray, demands: np.ndarray) -> dict:
+    served = np.minimum(allocations, demands)
+    reward = float(np.sum(prices * served))
+    return {"served": served, "reward": reward}
+
+
+def sample_gaussian_path(mu: np.ndarray, Sigma: np.ndarray, seed: Optional[int] = None) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    prices = rng.uniform(0.8, 2.0, size=T)
-    mu = rng.uniform(3.0, 8.0, size=T)
-    A = rng.normal(scale=1.0, size=(T, T))
-    Sigma = A @ A.T
-    # Normalize to moderate variances and some correlation
-    d = np.sqrt(np.diag(Sigma) + 1e-6)
-    Sigma = Sigma / (np.outer(d, d))  # correlation matrix
+    # Symmetrize and lightly regularize for numerical stability
+    S = 0.5 * (Sigma + Sigma.T)
+    S = S + 1e-10 * np.eye(S.shape[0])
+    return multivariate_normal.rvs(mean=mu, cov=S, random_state=rng)
+
+
+def build_synthetic(T: int, seed: int = 0, rho: float = 0.9) -> GaussianHorizon:
+    rng = np.random.default_rng(seed)
+    prices = rng.uniform(1, 2, size=T)
+    mu = rng.uniform(20.0, 100.0, size=T)
+    # High-correlation AR(1)-style correlation matrix
+    rho = float(np.clip(rho, 0.0 + 1e-6, 1.0 - 1e-6))
+    idx = np.arange(T)
+    Corr = rho ** np.abs(idx[:, None] - idx[None, :])
+    # Set marginal std scales and form covariance
     scales = rng.uniform(0.5, 2.0, size=T)
-    Sigma = Sigma * np.outer(scales, scales)
+    Sigma = np.outer(scales, scales) * Corr
 
     L = float(rng.uniform(0.3 * np.sum(mu), 0.6 * np.sum(mu)))
     return GaussianHorizon(T=T, prices=prices, L=L, mu=mu, Sigma=Sigma)
@@ -172,22 +191,60 @@ def main():
     ap = argparse.ArgumentParser(description="Algorithm 2 (receding horizon) with Gaussian demands, using Algorithm 1 for inner solves")
     ap.add_argument("--T", type=int, default=100, help="Horizon length")
     ap.add_argument("--L", type=float, default=None, help="Total resource budget. Default: random if not provided")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--simulate", type=bool, default=True, help="Simulate a demand path")
+    ap.add_argument("--seed", type=int, default=29)
+    ap.add_argument("--rho", type=float, default=0.4, help="Correlation parameter in (0,1) for AR(1)-like structure")
+    ap.add_argument("--compare-baseline", type=bool, default=True, help="Compare with static baseline using marginals")
+    ap.add_argument("--trials", type=int, default=100, help="Number of independent demand paths to evaluate")
     args = ap.parse_args()
 
-    gh = build_synthetic(args.T, args.seed)
+    gh = build_synthetic(args.T, args.seed, rho=args.rho)
     if args.L is not None:
         gh.L = float(args.L)
 
-    res = run_algorithm2(gh, eps=1e-6, seed=args.seed, simulate=args.simulate)
-    print(f"T={gh.T} L={gh.L:.2f} reward={res['reward']:.3f}")
-    print("prices:", np.array2string(gh.prices, precision=3))
-    print("allocations:", np.array2string(res["allocations"], precision=3))
-    if args.simulate:
+    if args.compare_baseline:
+        # Baseline allocations are fixed for given (prices, mu, Sigma, L)
+        base = run_baseline_static(gh, eps=1e-6)
+        if args.trials <= 1:
+            # Single trial detailed printout
+            d = sample_gaussian_path(gh.mu, gh.Sigma, seed=args.seed)
+            base_eval = evaluate_policy(gh.prices, base["allocations"], d)
+            rec = run_algorithm2(gh, eps=1e-6, seed=args.seed, demands=d)
+
+            print(f"T={gh.T} L={gh.L:.2f}")
+            print("prices:", np.array2string(gh.prices, precision=3))
+            print("demands:", np.array2string(d, precision=3))
+            print("baseline_alloc:", np.array2string(base["allocations"], precision=3))
+            print("receding_alloc:", np.array2string(rec["allocations"], precision=3))
+            print(f"baseline_reward: {base_eval['reward']:.3f}")
+            print(f"receding_reward: {rec['reward']:.3f}")
+        else:
+            # Multiple independent trials with different demand paths
+            base_rewards = []
+            rec_rewards = []
+            for i in range(args.trials):
+                print(f"Trial {i+1}/{args.trials}")
+                d = sample_gaussian_path(gh.mu, gh.Sigma, seed=args.seed + i)
+                base_eval = evaluate_policy(gh.prices, base["allocations"], d)
+                rec = run_algorithm2(gh, eps=1e-6, seed=args.seed + i, demands=d)
+                base_rewards.append(base_eval["reward"])
+                rec_rewards.append(rec["reward"])
+
+            base_rewards = np.array(base_rewards)
+            rec_rewards = np.array(rec_rewards)
+            improv = rec_rewards - base_rewards
+
+            print(f"T={gh.T} L={gh.L:.2f} trials={args.trials} rho={args.rho}")
+            print(f"baseline_mean: {base_rewards.mean():.3f}  std: {base_rewards.std(ddof=1):.3f}")
+            print(f"receding_mean: {rec_rewards.mean():.3f}  std: {rec_rewards.std(ddof=1):.3f}")
+            print(f"improvement_mean: {improv.mean():.3f}  std: {improv.std(ddof=1):.3f}")
+    else:
+        res = run_algorithm2(gh, eps=1e-6, seed=args.seed, demands=None)
+        print(f"T={gh.T} L={gh.L:.2f} reward={res['reward']:.3f}")
+        print("prices:", np.array2string(gh.prices, precision=3))
+        print("allocations:", np.array2string(res["allocations"], precision=3))
         print("realized:", np.array2string(res["realized"], precision=3))
         print("served:", np.array2string(res["served"], precision=3))
-    print("reward:", res["reward"])
+        print("reward:", res["reward"]) 
 
 if __name__ == "__main__":
     main()
