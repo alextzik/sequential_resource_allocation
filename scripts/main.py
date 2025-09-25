@@ -33,10 +33,10 @@ def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma
     # Implements Algorithm 1 using bisection on nu* with Normal survival inverses
     T = len(prices)
     assert mu_vec.shape == (T,) and sigma_vec.shape == (T,)
-    pmin = float(np.min(prices))
-    nu_low, nu_up = 0.0, pmin
+    pmax = float(np.max(prices))
+    nu_low, nu_up = 0.0, pmax
     # Number of iterations from paper: ceil(log(min{p}/eps))
-    N = int(np.ceil(np.log(max(pmin/eps, 1 + 1e-9))))
+    N = int(np.ceil(np.log(max(pmax/eps, 1 + 1e-9))))
 
     def alloc_for(nu: float) -> np.ndarray:
         s = np.clip(nu / prices, 0.0, 1.0)
@@ -191,7 +191,7 @@ def main():
     ap = argparse.ArgumentParser(description="Algorithm 2 (receding horizon) with Gaussian demands, using Algorithm 1 for inner solves")
     ap.add_argument("--T", type=int, default=100, help="Horizon length")
     ap.add_argument("--L", type=float, default=None, help="Total resource budget. Default: random if not provided")
-    ap.add_argument("--seed", type=int, default=29)
+    ap.add_argument("--seed", type=int, default=15)
     ap.add_argument("--rho", type=float, default=0.4, help="Correlation parameter in (0,1) for AR(1)-like structure")
     ap.add_argument("--compare-baseline", type=bool, default=True, help="Compare with static baseline using marginals")
     ap.add_argument("--trials", type=int, default=50, help="Number of independent demand paths to evaluate")
