@@ -1,6 +1,6 @@
-# receding_resource_allocation
+# shrinking_resource_allocation
 
-Receding-horizon resource allocation with Gaussian demand chance constraints (Algorithm 2 implementation).
+Shrinking-horizon resource allocation with stochastic demand.
 
 Quick start
 - Install deps (poetry):
