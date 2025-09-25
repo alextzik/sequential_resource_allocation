@@ -40,7 +40,7 @@ def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma
 
     def alloc_for(nu: float) -> np.ndarray:
         s = np.clip(nu / prices, 0.0, 1.0)
-        a = np.array([survival_inverse_normal(mu_vec[t], sigma_vec[t], s[t]) for t in range(T)])
+        a = np.array([survival_inverse_normal(mu_vec[t], sigma_vec[t], s[t]) if nu/prices[t]<1. else 0. for t in range(T)])
         return a
 
     a_mid = None
@@ -194,7 +194,7 @@ def main():
     ap.add_argument("--seed", type=int, default=29)
     ap.add_argument("--rho", type=float, default=0.4, help="Correlation parameter in (0,1) for AR(1)-like structure")
     ap.add_argument("--compare-baseline", type=bool, default=True, help="Compare with static baseline using marginals")
-    ap.add_argument("--trials", type=int, default=100, help="Number of independent demand paths to evaluate")
+    ap.add_argument("--trials", type=int, default=50, help="Number of independent demand paths to evaluate")
     args = ap.parse_args()
 
     gh = build_synthetic(args.T, args.seed, rho=args.rho)
