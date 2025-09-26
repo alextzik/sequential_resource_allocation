@@ -48,7 +48,7 @@ def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma
         return np.exp(a)
 
     a_mid = None
-    for _ in range(max(N, 50)):  # ensure enough iterations even if pmin/eps small
+    for _ in range(max(N, 50)):  # ensure enough iterations even if pmax/eps small
         nu_mid = 0.5 * (nu_low + nu_up)
         a_mid = alloc_for(nu_mid)
         if np.sum(a_mid) >= L:
