@@ -33,7 +33,7 @@ def survival_inverse_normal(mu: float, sigma: float, s: float) -> float:
     return mu + sigma * z
 
 
-def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma_vec: np.ndarray, eps: float = 1e-6) -> Tuple[np.ndarray, float]:
+def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma_vec: np.ndarray, eps: float = 1e-7) -> Tuple[np.ndarray, float]:
     # Implements Algorithm 1 using bisection on nu* with Normal survival inverses
     T = len(prices)
     assert mu_vec.shape == (T,) and sigma_vec.shape == (T,)
@@ -48,7 +48,7 @@ def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma
         return np.exp(a)
 
     a_mid = None
-    for _ in range(max(N, 30)):  # ensure enough iterations even if pmin/eps small
+    for _ in range(max(N, 50)):  # ensure enough iterations even if pmin/eps small
         nu_mid = 0.5 * (nu_low + nu_up)
         a_mid = alloc_for(nu_mid)
         if np.sum(a_mid) >= L:
@@ -60,6 +60,11 @@ def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma
 
     # Final allocation at nu_low 
     a_final = alloc_for(nu_low)
+    # Small adjustment to meet exactly the budget within tolerance by scaling if necessary
+    total = np.sum(a_final)
+    if total > 0 and abs(total - L) / max(1.0, L) > 1e-4:
+        scale = min(1.0, L / total)
+        a_final = a_final * scale
     return a_final, nu_low
 
 
@@ -187,6 +192,7 @@ def build_synthetic(T: int, seed: int = 0, rho: float = 0.9) -> GaussianHorizon:
     Corr = rho ** np.abs(idx[:, None] - idx[None, :])
     # Set marginal std scales and form covariance
     Sigma = np.outer(sigma, sigma) * Corr
+    # Sigma = np.diag(sigma**2)
 
     L = float(rng.uniform(0.3 * np.sum(mu_log), 0.6 * np.sum(mu_log)))
     return GaussianHorizon(T=T, prices=prices, L=L, mu=mu, Sigma=Sigma, mu_logs=mu_log, sigma_logs=sigma_log)
@@ -223,6 +229,8 @@ def main():
             print("receding_alloc:", np.array2string(rec["allocations"], precision=3))
             print(f"baseline_reward: {base_eval['reward']:.3f}")
             print(f"receding_reward: {rec['reward']:.3f}")
+            # print sum of allocations compared to L
+            print(f"sum_baseline_alloc: {np.sum(base['allocations']):.3f}  sum_receding_alloc: {np.sum(rec['allocations']):.3f}  L: {gh.L:.3f}")
 
 
             # Bar plot: realized demands vs mean demands
