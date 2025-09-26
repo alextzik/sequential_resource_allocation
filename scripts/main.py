@@ -348,6 +348,10 @@ def main():
             base_rewards = []
             optimal_rewards = []
             rec_rewards = []
+
+            base_rewards_series = []
+            optimal_rewards_series = []
+            rec_rewards_series = []
             for i in range(args.trials):
                 print(f"Trial {i+1}/{args.trials}")
                 d = sample_gaussian_path(gh.mu, gh.Sigma, seed=args.seed + i)
@@ -362,6 +366,10 @@ def main():
                 optimal_rewards.append(optimal_policy_eval["reward"][-1])
                 rec_rewards.append(rec["reward"][-1])
 
+                base_rewards_series.append(base_eval["reward"])
+                optimal_rewards_series.append(optimal_policy_eval["reward"])
+                rec_rewards_series.append(rec["reward"])
+
             base_rewards = np.array(base_rewards)
             optimal_rewards = np.array(optimal_rewards)
             rec_rewards = np.array(rec_rewards)
@@ -372,6 +380,37 @@ def main():
             print(f"receding_mean: {rec_rewards.mean():.3f}  std: {rec_rewards.std(ddof=1):.3f}")
             print(f"optimal_mean: {optimal_rewards.mean():.3f}  std: {optimal_rewards.std(ddof=1):.3f}")
             print(f"improvement_mean: {improv.mean():.3f}  std: {improv.std(ddof=1):.3f}")
+
+            #plot cumulative rewards over time with error bars
+            plt.rcParams["font.family"] = "Times New Roman"
+            plt.rcParams.update({'font.size': 20})
+            idx = np.arange(gh.T)
+            base_rewards_series = np.array(base_rewards_series)
+            optimal_rewards_series = np.array(optimal_rewards_series)
+            rec_rewards_series = np.array(rec_rewards_series)
+            # compute mean and std dev at each time step
+            base_mean = np.mean(base_rewards_series, axis=0)
+            base_std = np.std(base_rewards_series, axis=0, ddof=1)
+            rec_mean = np.mean(rec_rewards_series, axis=0)
+            rec_std = np.std(rec_rewards_series, axis=0, ddof=1)
+            optimal_mean = np.mean(optimal_rewards_series, axis=0)
+            optimal_std = np.std(optimal_rewards_series, axis=0, ddof=1)
+            plt.figure(figsize=(10,6))
+            plt.plot(idx, base_mean, label='Static', marker='o')
+            plt.fill_between(idx, base_mean - base_std, base_mean + base_std, alpha=0.2)
+            plt.plot(idx, rec_mean, label='Sequential')
+            plt.fill_between(idx, rec_mean - rec_std, rec_mean + rec_std, alpha=0.2)
+            plt.plot(idx, optimal_mean, label='Oracle', marker='o')
+            plt.fill_between(idx, optimal_mean - optimal_std, optimal_mean + optimal_std, alpha=0.2)
+            plt.xlabel('Time Period')
+            plt.ylabel('Cumulative Revenue')
+            # make y-axis be in scientific notation
+            plt.ticklabel_format(axis='y', style='sci', scilimits=(0,0))
+            # plt.title('Cumulative Rewards Over Time')
+            plt.legend()
+            plt.grid(True, axis='y', linestyle='--', alpha=0.4)
+            plt.tight_layout()
+            plt.show()
     else:
         res = run_algorithm2(gh, eps=1e-6, seed=args.seed, demands=None)
         print(f"T={gh.T} L={gh.L:.2f} reward={res['reward']:.3f}")
