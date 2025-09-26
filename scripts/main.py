@@ -191,8 +191,8 @@ def build_synthetic(T: int, seed: int = 0, rho: float = 0.9) -> GaussianHorizon:
     idx = np.arange(T)
     Corr = rho ** np.abs(idx[:, None] - idx[None, :])
     # Set marginal std scales and form covariance
-    Sigma = np.outer(sigma, sigma) * Corr
-    # Sigma = np.diag(sigma**2)
+    # Sigma = np.outer(sigma, sigma) * Corr
+    Sigma = np.diag(sigma**2)
 
     L = float(rng.uniform(0.3 * np.sum(mu_log), 0.6 * np.sum(mu_log)))
     return GaussianHorizon(T=T, prices=prices, L=L, mu=mu, Sigma=Sigma, mu_logs=mu_log, sigma_logs=sigma_log)
@@ -232,7 +232,9 @@ def main():
             # print sum of allocations compared to L
             print(f"sum_baseline_alloc: {np.sum(base['allocations']):.3f}  sum_receding_alloc: {np.sum(rec['allocations']):.3f}  L: {gh.L:.3f}")
 
-
+            # set font to Times new roman and increase font size
+            plt.rcParams["font.family"] = "Times New Roman"
+            plt.rcParams.update({'font.size': 20})
             # Bar plot: realized demands vs mean demands
             idx = np.arange(gh.T)
             width = 0.5
@@ -241,7 +243,7 @@ def main():
             plt.bar(idx + width/2, gh.mu_logs, width=width, label='Mean Demand')
             plt.xlabel('Time Period')
             plt.ylabel('Demand')
-            plt.title('Realized vs Mean Demand')
+            # plt.title('Realized vs Mean Demand')
             plt.legend()
             plt.grid(True, axis='y', linestyle='--', alpha=0.4)
             plt.tight_layout()
@@ -253,7 +255,7 @@ def main():
             plt.bar(idx + width/2, rec["allocations"], width=width, label='Sequential Allocations')
             plt.xlabel('Time Period')
             plt.ylabel('Allocation')
-            plt.title('Allocations Over Time')
+            # plt.title('Allocations Over Time')
             plt.legend()
             plt.grid(True, axis='y', linestyle='--', alpha=0.4)
             plt.tight_layout()
