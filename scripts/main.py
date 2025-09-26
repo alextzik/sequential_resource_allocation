@@ -7,6 +7,8 @@ import numpy as np
 from numpy.linalg import LinAlgError
 from scipy.stats import norm, multivariate_normal
 
+import cvxpy as cp
+
 import matplotlib.pyplot as plt
 
 
@@ -139,7 +141,7 @@ def run_algorithm2(gh: GaussianHorizon, eps: float = 1e-6, seed: Optional[int] =
 
     # Compute reward if realized available
     served = np.minimum(np.exp(realized), allocations)
-    reward = float(np.sum(prices * served))
+    reward = np.cumsum(prices * served)
 
     return {
         "allocations": allocations,
@@ -159,12 +161,23 @@ def run_baseline_static(gh: GaussianHorizon, eps: float = 1e-6) -> dict:
     allocations, nu = algorithm1_bisection(gh.prices, gh.L, mu, sigma, eps=eps)
     return {"allocations": allocations, "nu": nu}
 
+def optimal_after_the_fact(prices: np.ndarray, L: float, demands: np.ndarray) -> dict:
+    # Solve the offline optimal allocation problem given realized demands
+    T = len(prices)
+    assert demands.shape == (T,)
+    # Sort by price/demand ratio in descending order
+    allocations = cp.Variable(T, nonneg=True)
+    objective = cp.Maximize(prices @ cp.minimum(allocations, demands))
+    constraints = [cp.sum(allocations) <= L]
+    prob = cp.Problem(objective, constraints)
+    prob.solve()
+
+    return {"allocations": allocations.value, "nu": None}
 
 def evaluate_policy(prices: np.ndarray, allocations: np.ndarray, demands: np.ndarray) -> dict:
     served = np.minimum(allocations, demands)
-    reward = float(np.sum(prices * served))
+    reward = np.cumsum(prices * served)
     return {"served": served, "reward": reward}
-
 
 def sample_gaussian_path(mu: np.ndarray, Sigma: np.ndarray, seed: Optional[int] = None) -> np.ndarray:
     rng = np.random.default_rng(seed)
@@ -220,17 +233,25 @@ def main():
             d = sample_gaussian_path(gh.mu, gh.Sigma, seed=args.seed)
             d = np.exp(d)  # convert to log-normal demands
             base_eval = evaluate_policy(gh.prices, base["allocations"], d)
+
+            optimal_policy = optimal_after_the_fact(gh.prices, gh.L, d)
+            optimal_policy_eval = evaluate_policy(gh.prices, optimal_policy["allocations"], d)
+
             rec = run_algorithm2(gh, eps=1e-6, seed=args.seed, demands=d)
 
             print(f"T={gh.T} L={gh.L:.2f}")
             print("prices:", np.array2string(gh.prices, precision=3))
             print("demands:", np.array2string(d, precision=3))
             print("baseline_alloc:", np.array2string(base["allocations"], precision=3))
+            print("optimal_alloc:", np.array2string(optimal_policy["allocations"], precision=3))
             print("receding_alloc:", np.array2string(rec["allocations"], precision=3))
-            print(f"baseline_reward: {base_eval['reward']:.3f}")
-            print(f"receding_reward: {rec['reward']:.3f}")
+            print(f"baseline_reward: {base_eval['reward'][-1]:.3f}")
+            print(f"optimal_reward: {optimal_policy_eval['reward'][-1]:.3f}")
+            print(f"receding_reward: {rec['reward'][-1]:.3f}")
             # print sum of allocations compared to L
-            print(f"sum_baseline_alloc: {np.sum(base['allocations']):.3f}  sum_receding_alloc: {np.sum(rec['allocations']):.3f}  L: {gh.L:.3f}")
+            print(f"sum_baseline_alloc: {np.sum(base['allocations']):.3f}  \
+                  sum_optimal_alloc: {np.sum(optimal_policy['allocations']):.3f}  \
+                    sum_receding_alloc: {np.sum(rec['allocations']):.3f}  L: {gh.L:.3f}")
 
             # set font to Times new roman and increase font size
             plt.rcParams["font.family"] = "Times New Roman"
@@ -249,10 +270,23 @@ def main():
             plt.tight_layout()
             plt.show()
 
-            # Bar plot: allocations (baseline vs sequential)
+            # make a bar plot of prices
             plt.figure(figsize=(10,6))
-            plt.bar(idx - width/2, base["allocations"], width=width, label='Static Allocations')
-            plt.bar(idx + width/2, rec["allocations"], width=width, label='Sequential Allocations')
+            plt.bar(np.arange(gh.T), gh.prices, width=0.5, color='orange')
+            plt.xlabel('Time Period')
+            plt.ylabel('Price')
+            # plt.title('Prices Over Time')
+            plt.grid(True, axis='y', linestyle='--', alpha=0.4)
+            plt.tight_layout()
+            plt.show()
+
+            # Bar plot: allocations (baseline vs sequential vs optimal)
+            plt.figure(figsize=(10,6))
+            width_alloc = 0.6
+            offset = width_alloc
+            plt.bar(idx - offset, base["allocations"], width=width_alloc, label='Static')
+            plt.bar(idx, rec["allocations"], width=width_alloc, label='Sequential')
+            plt.bar(idx + offset, optimal_policy["allocations"], width=width_alloc, label='Oracle', alpha=0.4)
             plt.xlabel('Time Period')
             plt.ylabel('Allocation')
             # plt.title('Allocations Over Time')
@@ -260,7 +294,22 @@ def main():
             plt.grid(True, axis='y', linestyle='--', alpha=0.4)
             plt.tight_layout()
             plt.show()
- 
+
+            # make a line plot of the cumulative rewards over time
+            plt.figure(figsize=(10,6))
+            plt.plot(idx, base_eval['reward'], label='Static', marker='o')
+            plt.plot(idx, rec['reward'], label='Sequential')
+            plt.plot(idx, optimal_policy_eval['reward'], label='Oracle', marker='o')
+            plt.xlabel('Time Period')
+            plt.ylabel('Cumulative Revenue')
+            # make y-axis be in scientific notation
+            plt.ticklabel_format(axis='y', style='sci', scilimits=(0,0))
+            # plt.title('Cumulative Rewards Over Time')
+            plt.legend()
+            plt.grid(True, axis='y', linestyle='--', alpha=0.4)
+            plt.tight_layout()
+            plt.show()
+
         else:
             # Multiple independent trials with different demand paths
             base_rewards = []
@@ -270,17 +319,24 @@ def main():
                 d = sample_gaussian_path(gh.mu, gh.Sigma, seed=args.seed + i)
                 d = np.exp(d)  # convert to log-normal demands
                 base_eval = evaluate_policy(gh.prices, base["allocations"], d)
+
+                optimal_policy = optimal_after_the_fact(gh.prices, gh.L, d)
+                optimal_policy_eval = evaluate_policy(gh.prices, optimal_policy["allocations"], d)
+
                 rec = run_algorithm2(gh, eps=1e-6, seed=args.seed + i, demands=d)
-                base_rewards.append(base_eval["reward"])
-                rec_rewards.append(rec["reward"])
+                base_rewards.append(base_eval["reward"][-1])
+                optimal_rewards.append(optimal_policy_eval["reward"][-1])
+                rec_rewards.append(rec["reward"][-1])
 
             base_rewards = np.array(base_rewards)
+            optimal_rewards = np.array(optimal_rewards)
             rec_rewards = np.array(rec_rewards)
             improv = rec_rewards - base_rewards
 
             print(f"T={gh.T} L={gh.L:.2f} trials={args.trials} rho={args.rho}")
             print(f"baseline_mean: {base_rewards.mean():.3f}  std: {base_rewards.std(ddof=1):.3f}")
             print(f"receding_mean: {rec_rewards.mean():.3f}  std: {rec_rewards.std(ddof=1):.3f}")
+            print(f"optimal_mean: {optimal_rewards.mean():.3f}  std: {optimal_rewards.std(ddof=1):.3f}")
             print(f"improvement_mean: {improv.mean():.3f}  std: {improv.std(ddof=1):.3f}")
     else:
         res = run_algorithm2(gh, eps=1e-6, seed=args.seed, demands=None)
