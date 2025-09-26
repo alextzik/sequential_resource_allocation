@@ -7,6 +7,8 @@ import numpy as np
 from numpy.linalg import LinAlgError
 from scipy.stats import norm, multivariate_normal
 
+import matplotlib.pyplot as plt
+
 
 @dataclass
 class GaussianHorizon:
@@ -15,6 +17,8 @@ class GaussianHorizon:
     L: float  # total resource budget
     mu: np.ndarray  # shape (T,)
     Sigma: np.ndarray  # shape (T,T)
+    mu_logs: Optional[np.ndarray] = None  # shape (T,), optional, for reference
+    sigma_logs: Optional[np.ndarray] = None  # shape (T,), optional, for
 
 
 def survival_inverse_normal(mu: float, sigma: float, s: float) -> float:
@@ -26,7 +30,7 @@ def survival_inverse_normal(mu: float, sigma: float, s: float) -> float:
         # Then S(u) = 1 if u <= mu else 0; inverse picks u = mu for any s in (0,1)
         return max(0.0, mu)
     z = norm.ppf(1.0 - s)
-    return max(0.0, mu + sigma * z)
+    return mu + sigma * z
 
 
 def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma_vec: np.ndarray, eps: float = 1e-6) -> Tuple[np.ndarray, float]:
@@ -35,13 +39,13 @@ def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma
     assert mu_vec.shape == (T,) and sigma_vec.shape == (T,)
     pmax = float(np.max(prices))
     nu_low, nu_up = 0.0, pmax
-    # Number of iterations from paper: ceil(log(min{p}/eps))
+    # Number of iterations from paper: ceil(log(max{p}/eps))
     N = int(np.ceil(np.log(max(pmax/eps, 1 + 1e-9))))
 
     def alloc_for(nu: float) -> np.ndarray:
-        s = np.clip(nu / prices, 0.0, 1.0)
+        s = nu / prices
         a = np.array([survival_inverse_normal(mu_vec[t], sigma_vec[t], s[t]) if nu/prices[t]<1. else 0. for t in range(T)])
-        return a
+        return np.exp(a)
 
     a_mid = None
     for _ in range(max(N, 30)):  # ensure enough iterations even if pmin/eps small
@@ -56,11 +60,6 @@ def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma
 
     # Final allocation at nu_low 
     a_final = alloc_for(nu_low)
-    # Small adjustment to meet exactly the budget within tolerance by scaling if necessary
-    total = np.sum(a_final)
-    if total > 0 and abs(total - L) / max(1.0, L) > 1e-3:
-        scale = min(1.0, L / total)
-        a_final = a_final * scale
     return a_final, nu_low
 
 
@@ -116,31 +115,30 @@ def run_algorithm2(gh: GaussianHorizon, eps: float = 1e-6, seed: Optional[int] =
 
         a_future, nu = algorithm1_bisection(prices[t:], remaining, mu_cond, sigma_cond, eps=eps)
         a_t = float(a_future[0])
-        # Clip by remaining
-        a_t = float(min(a_t, remaining))
         allocations[t] = a_t
         remaining -= a_t
 
         # Realize demand
         if demands is not None:
             d_t = float(demands[t])
+            log_d_t = np.log(d_t)
         else:
             # sample from conditional for the single next variable
             mu1, Sig1 = conditional_gaussian(mu, Sigma, np.arange(t), realized[:t], np.array([t]))
-            d_t = float(rng.normal(mu1[0], np.sqrt(max(Sig1[0,0], 0.0))))
-        realized[t] = d_t
+            log_d_t = float(rng.normal(mu1[0], np.sqrt(max(Sig1[0,0], 0.0))))
+        realized[t] = log_d_t
 
         # Update conditioning sets
         obs_idx = np.arange(t+1)
         obs_vals = realized[:t+1]
 
     # Compute reward if realized available
-    served = np.minimum(realized, allocations)
+    served = np.minimum(np.exp(realized), allocations)
     reward = float(np.sum(prices * served))
 
     return {
         "allocations": allocations,
-        "realized": realized,
+        "realized": np.exp(realized),
         "served": served,
         "reward": reward,
         "remaining": remaining,
@@ -170,21 +168,28 @@ def sample_gaussian_path(mu: np.ndarray, Sigma: np.ndarray, seed: Optional[int] 
     S = S + 1e-10 * np.eye(S.shape[0])
     return multivariate_normal.rvs(mean=mu, cov=S, random_state=rng)
 
+def get_normal_pars_from_lognormal(mu_log: np.ndarray, sigma_log: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    # Given mu_log and sigma_log for log-normal distribution, return mu and sigma for the underlying normal distribution
+    sigma2_log = sigma_log ** 2
+    mu = np.log(mu_log**2 / np.sqrt(sigma2_log + mu_log**2))
+    sigma = np.sqrt(np.log(1 + sigma2_log / mu_log**2))
+    return mu, sigma
 
 def build_synthetic(T: int, seed: int = 0, rho: float = 0.9) -> GaussianHorizon:
     rng = np.random.default_rng(seed)
-    prices = rng.uniform(1, 2, size=T)
-    mu = rng.uniform(20.0, 100.0, size=T)
+    prices = rng.uniform(10, 100, size=T)
+    mu_log = rng.uniform(20.0, 100.0, size=T)
+    sigma_log = rng.uniform(10.0, 30.0, size=T)
+    mu, sigma = get_normal_pars_from_lognormal(mu_log, sigma_log)
     # High-correlation AR(1)-style correlation matrix
     rho = float(np.clip(rho, 0.0 + 1e-6, 1.0 - 1e-6))
     idx = np.arange(T)
     Corr = rho ** np.abs(idx[:, None] - idx[None, :])
     # Set marginal std scales and form covariance
-    scales = rng.uniform(0.5, 2.0, size=T)
-    Sigma = np.outer(scales, scales) * Corr
+    Sigma = np.outer(sigma, sigma) * Corr
 
-    L = float(rng.uniform(0.3 * np.sum(mu), 0.6 * np.sum(mu)))
-    return GaussianHorizon(T=T, prices=prices, L=L, mu=mu, Sigma=Sigma)
+    L = float(rng.uniform(0.3 * np.sum(mu_log), 0.6 * np.sum(mu_log)))
+    return GaussianHorizon(T=T, prices=prices, L=L, mu=mu, Sigma=Sigma, mu_logs=mu_log, sigma_logs=sigma_log)
 
 
 def main():
@@ -194,7 +199,7 @@ def main():
     ap.add_argument("--seed", type=int, default=15)
     ap.add_argument("--rho", type=float, default=0.4, help="Correlation parameter in (0,1) for AR(1)-like structure")
     ap.add_argument("--compare-baseline", type=bool, default=True, help="Compare with static baseline using marginals")
-    ap.add_argument("--trials", type=int, default=50, help="Number of independent demand paths to evaluate")
+    ap.add_argument("--trials", type=int, default=1, help="Number of independent demand paths to evaluate")
     args = ap.parse_args()
 
     gh = build_synthetic(args.T, args.seed, rho=args.rho)
@@ -207,6 +212,7 @@ def main():
         if args.trials <= 1:
             # Single trial detailed printout
             d = sample_gaussian_path(gh.mu, gh.Sigma, seed=args.seed)
+            d = np.exp(d)  # convert to log-normal demands
             base_eval = evaluate_policy(gh.prices, base["allocations"], d)
             rec = run_algorithm2(gh, eps=1e-6, seed=args.seed, demands=d)
 
@@ -217,6 +223,34 @@ def main():
             print("receding_alloc:", np.array2string(rec["allocations"], precision=3))
             print(f"baseline_reward: {base_eval['reward']:.3f}")
             print(f"receding_reward: {rec['reward']:.3f}")
+
+
+            # Bar plot: realized demands vs mean demands
+            idx = np.arange(gh.T)
+            width = 0.5
+            plt.figure(figsize=(10,6))
+            plt.bar(idx - width/2, d, width=width, label='Realized Demand')
+            plt.bar(idx + width/2, gh.mu_logs, width=width, label='Mean Demand')
+            plt.xlabel('Time Period')
+            plt.ylabel('Demand')
+            plt.title('Realized vs Mean Demand')
+            plt.legend()
+            plt.grid(True, axis='y', linestyle='--', alpha=0.4)
+            plt.tight_layout()
+            plt.show()
+
+            # Bar plot: allocations (baseline vs sequential)
+            plt.figure(figsize=(10,6))
+            plt.bar(idx - width/2, base["allocations"], width=width, label='Static Allocations')
+            plt.bar(idx + width/2, rec["allocations"], width=width, label='Sequential Allocations')
+            plt.xlabel('Time Period')
+            plt.ylabel('Allocation')
+            plt.title('Allocations Over Time')
+            plt.legend()
+            plt.grid(True, axis='y', linestyle='--', alpha=0.4)
+            plt.tight_layout()
+            plt.show()
+ 
         else:
             # Multiple independent trials with different demand paths
             base_rewards = []
@@ -224,6 +258,7 @@ def main():
             for i in range(args.trials):
                 print(f"Trial {i+1}/{args.trials}")
                 d = sample_gaussian_path(gh.mu, gh.Sigma, seed=args.seed + i)
+                d = np.exp(d)  # convert to log-normal demands
                 base_eval = evaluate_policy(gh.prices, base["allocations"], d)
                 rec = run_algorithm2(gh, eps=1e-6, seed=args.seed + i, demands=d)
                 base_rewards.append(base_eval["reward"])
