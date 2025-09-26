@@ -10,6 +10,7 @@ from scipy.stats import norm, multivariate_normal
 import cvxpy as cp
 
 import matplotlib.pyplot as plt
+import pandas as pd
 
 
 @dataclass
@@ -193,19 +194,51 @@ def get_normal_pars_from_lognormal(mu_log: np.ndarray, sigma_log: np.ndarray) ->
     sigma = np.sqrt(np.log(1 + sigma2_log / mu_log**2))
     return mu, sigma
 
-def build_synthetic(T: int, seed: int = 0, rho: float = 0.9) -> GaussianHorizon:
+def get_corr(T: int, rho: float = 0.7, rng: Optional[np.random.Generator] = None) -> np.ndarray:
+    """Correlation matrix with off-diagonals exactly in {+rho, -rho}.
+    Corr = (1 - rho) I + rho * s s^T, where s_i ∈ {+1, -1}. This is SPD for 0 < rho < 1.
+    """
+    if rng is None:
+        rng = np.random.default_rng()
+    # Use outer-product construction to ensure SPD and ±rho off-diagonals
+    s = rng.choice([-1.0, 1.0], size=(T, T))
+    s = np.triu(s, 1)
+    s = (s + s.T)
+    Corr = rho*s
+    np.fill_diagonal(Corr, 1.0)
+
+    # Use cvxpy to find nearest correlation matrix
+    X = cp.Variable((T, T), PSD=True)
+    constraints = [cp.diag(X) == 1]
+    objective = cp.Minimize(cp.norm(X - Corr, 'fro'))
+    prob = cp.Problem(objective, constraints)
+    prob.solve()
+    Corr = X.value        
+    return Corr
+
+def build_synthetic(T: int, seed: int = 0, rho: float = 0.7) -> GaussianHorizon:
     rng = np.random.default_rng(seed)
     prices = rng.uniform(10, 100, size=T)
     mu_log = rng.uniform(20.0, 100.0, size=T)
     sigma_log = rng.uniform(10.0, 30.0, size=T)
     mu, sigma = get_normal_pars_from_lognormal(mu_log, sigma_log)
-    # High-correlation AR(1)-style correlation matrix
-    rho = float(np.clip(rho, 0.0 + 1e-6, 1.0 - 1e-6))
-    idx = np.arange(T)
-    Corr = rho ** np.abs(idx[:, None] - idx[None, :])
+    # Correlation concentrated at ±rho
+    Corr = get_corr(T, rho=rho, rng=rng)
     # Set marginal std scales and form covariance
-    # Sigma = np.outer(sigma, sigma) * Corr
-    Sigma = np.diag(sigma**2)
+    Sigma = np.outer(sigma, sigma) * Corr
+    # Project to nearest PD matrix if needed
+    X = cp.Variable((T, T), PSD=True)
+    constraints = [cp.diag(X) == sigma**2]
+    objective = cp.Minimize(cp.norm(X - Sigma, 'fro'))
+    prob = cp.Problem(objective, constraints)
+    prob.solve()
+    Sigma = X.value 
+    # clip eigenvalues to be at least 1e-6
+    eigvals, eigvecs = np.linalg.eigh(Sigma)
+    eigvals = np.clip(eigvals, 1e-6, None)
+    Sigma = (eigvecs * eigvals) @ eigvecs.T
+
+    # Sigma = np.diag(sigma**2)
 
     L = float(rng.uniform(0.3 * np.sum(mu_log), 0.6 * np.sum(mu_log)))
     return GaussianHorizon(T=T, prices=prices, L=L, mu=mu, Sigma=Sigma, mu_logs=mu_log, sigma_logs=sigma_log)
@@ -216,7 +249,7 @@ def main():
     ap.add_argument("--T", type=int, default=100, help="Horizon length")
     ap.add_argument("--L", type=float, default=None, help="Total resource budget. Default: random if not provided")
     ap.add_argument("--seed", type=int, default=15)
-    ap.add_argument("--rho", type=float, default=0.4, help="Correlation parameter in (0,1) for AR(1)-like structure")
+    ap.add_argument("--rho", type=float, default=0.7, help="Target absolute correlation; off-diagonals at ±rho")
     ap.add_argument("--compare-baseline", type=bool, default=True, help="Compare with static baseline using marginals")
     ap.add_argument("--trials", type=int, default=1, help="Number of independent demand paths to evaluate")
     args = ap.parse_args()
@@ -313,6 +346,7 @@ def main():
         else:
             # Multiple independent trials with different demand paths
             base_rewards = []
+            optimal_rewards = []
             rec_rewards = []
             for i in range(args.trials):
                 print(f"Trial {i+1}/{args.trials}")
