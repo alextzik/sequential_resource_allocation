@@ -20,8 +20,8 @@ class GaussianHorizon:
     L: float  # total resource budget
     mu: np.ndarray  # shape (T,)
     Sigma: np.ndarray  # shape (T,T)
-    mu_logs: Optional[np.ndarray] = None  # shape (T,), optional, for reference
-    sigma_logs: Optional[np.ndarray] = None  # shape (T,), optional, for
+    mu_logs: Optional[np.ndarray] = None  # shape (T,), optional
+    sigma_logs: Optional[np.ndarray] = None  # shape (T,), optional
 
 
 def survival_inverse_normal(mu: float, sigma: float, s: float) -> float:
@@ -36,7 +36,11 @@ def survival_inverse_normal(mu: float, sigma: float, s: float) -> float:
     return mu + sigma * z
 
 
-def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma_vec: np.ndarray, eps: float = 1e-7) -> Tuple[np.ndarray, float]:
+def algorithm1_bisection(prices: np.ndarray, 
+                         L: float, 
+                         mu_vec: np.ndarray, 
+                         sigma_vec: np.ndarray, 
+                         eps: float = 1e-7) -> Tuple[np.ndarray, float]:
     # Implements Algorithm 1 using bisection on nu* with Normal survival inverses
     T = len(prices)
     assert mu_vec.shape == (T,) and sigma_vec.shape == (T,)
@@ -71,7 +75,11 @@ def algorithm1_bisection(prices: np.ndarray, L: float, mu_vec: np.ndarray, sigma
     return a_final, nu_low
 
 
-def conditional_gaussian(mu: np.ndarray, Sigma: np.ndarray, obs_idx: np.ndarray, obs_vals: np.ndarray, target_idx: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def conditional_gaussian(mu: np.ndarray, 
+                         Sigma: np.ndarray, 
+                         obs_idx: np.ndarray, 
+                         obs_vals: np.ndarray, 
+                         target_idx: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     # Returns (mu_cond, Sigma_cond) for target given the observations
     if obs_idx.size == 0:
         return mu[target_idx], Sigma[np.ix_(target_idx, target_idx)]
@@ -98,7 +106,10 @@ def conditional_gaussian(mu: np.ndarray, Sigma: np.ndarray, obs_idx: np.ndarray,
     return mu_cond, Sigma_cond
 
 
-def run_algorithm2(gh: GaussianHorizon, eps: float = 1e-6, seed: Optional[int] = None, demands: Optional[np.ndarray] = None) -> dict:
+def run_algorithm2(gh: GaussianHorizon, 
+                   eps: float = 1e-6, 
+                   seed: Optional[int] = None, 
+                   demands: Optional[np.ndarray] = None) -> dict:
     T = gh.T
     prices = gh.prices
     L = gh.L
@@ -162,6 +173,24 @@ def run_baseline_static(gh: GaussianHorizon, eps: float = 1e-6) -> dict:
     allocations, nu = algorithm1_bisection(gh.prices, gh.L, mu, sigma, eps=eps)
     return {"allocations": allocations, "nu": nu}
 
+def run_baseline_roll_forward(gh: GaussianHorizon, demands: np.ndarray) -> dict:
+    """Baseline: at time t, allocate the last observed demand d_{t-1};
+    start with 0 at t=0; stop when budget is exhausted.
+
+    allocations[t] = min(remaining, demands[t-1]) for t>=1; allocations[0] = 0.
+    """
+    T = gh.T
+    allocations = np.zeros(T)
+    remaining = float(gh.L)
+    for t in range(T):
+        if remaining <= 1e-12:
+            break
+        a_t = gh.L/T if t == 0 else float(demands[t - 1])
+        a_t = min(a_t, remaining)
+        allocations[t] = a_t
+        remaining -= a_t
+    return {"allocations": allocations, "remaining": remaining}
+
 def optimal_after_the_fact(prices: np.ndarray, L: float, demands: np.ndarray) -> dict:
     # Solve the offline optimal allocation problem given realized demands
     T = len(prices)
@@ -195,8 +224,7 @@ def get_normal_pars_from_lognormal(mu_log: np.ndarray, sigma_log: np.ndarray) ->
     return mu, sigma
 
 def get_corr(T: int, rho: float = 0.7, rng: Optional[np.random.Generator] = None) -> np.ndarray:
-    """Correlation matrix with off-diagonals exactly in {+rho, -rho}.
-    Corr = (1 - rho) I + rho * s s^T, where s_i ∈ {+1, -1}. This is SPD for 0 < rho < 1.
+    """Correlation matrix
     """
     if rng is None:
         rng = np.random.default_rng()
@@ -238,6 +266,8 @@ def build_synthetic(T: int, seed: int = 0, rho: float = 0.7) -> GaussianHorizon:
     eigvals = np.clip(eigvals, 1e-6, None)
     Sigma = (eigvecs * eigvals) @ eigvecs.T
 
+    # pd.DataFrame(Sigma).corr().stack().hist(bins=30)
+    # plt.show()
     # Sigma = np.diag(sigma**2)
 
     L = float(rng.uniform(0.3 * np.sum(mu_log), 0.6 * np.sum(mu_log)))
@@ -266,6 +296,9 @@ def main():
             d = sample_gaussian_path(gh.mu, gh.Sigma, seed=args.seed)
             d = np.exp(d)  # convert to log-normal demands
             base_eval = evaluate_policy(gh.prices, base["allocations"], d)
+            # Last-observed-demand baseline
+            last_base = run_baseline_roll_forward(gh, d)
+            last_base_eval = evaluate_policy(gh.prices, last_base["allocations"], d)
 
             optimal_policy = optimal_after_the_fact(gh.prices, gh.L, d)
             optimal_policy_eval = evaluate_policy(gh.prices, optimal_policy["allocations"], d)
@@ -277,24 +310,27 @@ def main():
             print("demands:", np.array2string(d, precision=3))
             print("baseline_alloc:", np.array2string(base["allocations"], precision=3))
             print("optimal_alloc:", np.array2string(optimal_policy["allocations"], precision=3))
+            print("last_demand_alloc:", np.array2string(last_base["allocations"], precision=3))
             print("receding_alloc:", np.array2string(rec["allocations"], precision=3))
             print(f"baseline_reward: {base_eval['reward'][-1]:.3f}")
+            print(f"last_demand_reward: {last_base_eval['reward'][-1]:.3f}")
             print(f"optimal_reward: {optimal_policy_eval['reward'][-1]:.3f}")
             print(f"receding_reward: {rec['reward'][-1]:.3f}")
             # print sum of allocations compared to L
             print(f"sum_baseline_alloc: {np.sum(base['allocations']):.3f}  \
                   sum_optimal_alloc: {np.sum(optimal_policy['allocations']):.3f}  \
-                    sum_receding_alloc: {np.sum(rec['allocations']):.3f}  L: {gh.L:.3f}")
+                  sum_last_demand_alloc: {np.sum(last_base['allocations']):.3f}  \
+                  sum_receding_alloc: {np.sum(rec['allocations']):.3f}  L: {gh.L:.3f}")
 
             # set font to Times new roman and increase font size
             plt.rcParams["font.family"] = "Times New Roman"
-            plt.rcParams.update({'font.size': 20})
+            plt.rcParams.update({'font.size': 23})
             # Bar plot: realized demands vs mean demands
             idx = np.arange(gh.T)
             width = 0.5
             plt.figure(figsize=(10,6))
-            plt.bar(idx - width/2, d, width=width, label='Realized Demand')
-            plt.bar(idx + width/2, gh.mu_logs, width=width, label='Mean Demand')
+            plt.bar(idx - width/2, d, width=width, label='realized')
+            plt.bar(idx + width/2, gh.mu_logs, width=width, label='mean')
             plt.xlabel('Time Period')
             plt.ylabel('Demand')
             # plt.title('Realized vs Mean Demand')
@@ -313,13 +349,16 @@ def main():
             plt.tight_layout()
             plt.show()
 
-            # Bar plot: allocations (baseline vs sequential vs optimal)
-            plt.figure(figsize=(10,6))
-            width_alloc = 0.6
-            offset = width_alloc
-            plt.bar(idx - offset, base["allocations"], width=width_alloc, label='Static')
-            plt.bar(idx, rec["allocations"], width=width_alloc, label='Sequential')
-            plt.bar(idx + offset, optimal_policy["allocations"], width=width_alloc, label='Oracle', alpha=0.4)
+            # Bar plot: allocations (static vs roll-forward vs sequential vs oracle)
+            plt.figure(figsize=(12,6))
+            n_series = 3
+            group_width = 1.0  # total width of all bars in a group
+            bar_w = group_width / n_series
+            offsets = (np.arange(n_series) - (n_series - 1) / 2.0) * bar_w
+            # Order left-to-right: static, roll-forward, sequential, oracle
+            plt.bar(idx + offsets[0], base["allocations"], width=bar_w, label='static')
+            plt.bar(idx + offsets[1], rec["allocations"], width=bar_w, label='sequential')
+            plt.bar(idx + offsets[2], optimal_policy["allocations"], width=bar_w, label='oracle', alpha=0.4)
             plt.xlabel('Time Period')
             plt.ylabel('Allocation')
             # plt.title('Allocations Over Time')
@@ -330,9 +369,10 @@ def main():
 
             # make a line plot of the cumulative rewards over time
             plt.figure(figsize=(10,6))
-            plt.plot(idx, base_eval['reward'], label='Static', marker='o')
-            plt.plot(idx, rec['reward'], label='Sequential')
-            plt.plot(idx, optimal_policy_eval['reward'], label='Oracle', marker='o')
+            plt.plot(idx, base_eval['reward'], label='static', marker='o')
+            plt.plot(idx, rec['reward'], label='sequential')
+            plt.plot(idx, optimal_policy_eval['reward'], label='oracle', marker='o')
+            plt.plot(idx, last_base_eval['reward'], label='roll-forward', marker='o')
             plt.xlabel('Time Period')
             plt.ylabel('Cumulative Revenue')
             # make y-axis be in scientific notation
@@ -346,10 +386,12 @@ def main():
         else:
             # Multiple independent trials with different demand paths
             base_rewards = []
+            last_base_rewards = []
             optimal_rewards = []
             rec_rewards = []
 
             base_rewards_series = []
+            last_base_rewards_series = []
             optimal_rewards_series = []
             rec_rewards_series = []
             for i in range(args.trials):
@@ -357,25 +399,31 @@ def main():
                 d = sample_gaussian_path(gh.mu, gh.Sigma, seed=args.seed + i)
                 d = np.exp(d)  # convert to log-normal demands
                 base_eval = evaluate_policy(gh.prices, base["allocations"], d)
+                base_rewards.append(base_eval["reward"][-1])
 
                 optimal_policy = optimal_after_the_fact(gh.prices, gh.L, d)
                 optimal_policy_eval = evaluate_policy(gh.prices, optimal_policy["allocations"], d)
+                optimal_rewards.append(optimal_policy_eval["reward"][-1])
 
                 rec = run_algorithm2(gh, eps=1e-6, seed=args.seed + i, demands=d)
-                base_rewards.append(base_eval["reward"][-1])
-                optimal_rewards.append(optimal_policy_eval["reward"][-1])
                 rec_rewards.append(rec["reward"][-1])
+                
+                last_base_eval = evaluate_policy(gh.prices, run_baseline_roll_forward(gh, d)["allocations"], d)
+                last_base_rewards.append(last_base_eval["reward"][-1])
 
                 base_rewards_series.append(base_eval["reward"])
+                last_base_rewards_series.append(last_base_eval["reward"])
                 optimal_rewards_series.append(optimal_policy_eval["reward"])
                 rec_rewards_series.append(rec["reward"])
 
             base_rewards = np.array(base_rewards)
+            last_base_rewards = np.array(last_base_rewards)
             optimal_rewards = np.array(optimal_rewards)
             rec_rewards = np.array(rec_rewards)
             improv = rec_rewards - base_rewards
 
             print(f"T={gh.T} L={gh.L:.2f} trials={args.trials} rho={args.rho}")
+            print(f"last_demand_mean: {last_base_rewards.mean():.3f}  std: {np.array(last_base_rewards).std(ddof=1):.3f}")
             print(f"baseline_mean: {base_rewards.mean():.3f}  std: {base_rewards.std(ddof=1):.3f}")
             print(f"receding_mean: {rec_rewards.mean():.3f}  std: {rec_rewards.std(ddof=1):.3f}")
             print(f"optimal_mean: {optimal_rewards.mean():.3f}  std: {optimal_rewards.std(ddof=1):.3f}")
@@ -383,25 +431,30 @@ def main():
 
             #plot cumulative rewards over time with error bars
             plt.rcParams["font.family"] = "Times New Roman"
-            plt.rcParams.update({'font.size': 20})
+            plt.rcParams.update({'font.size': 23})
             idx = np.arange(gh.T)
             base_rewards_series = np.array(base_rewards_series)
+            last_base_rewards_series = np.array(last_base_rewards_series)
             optimal_rewards_series = np.array(optimal_rewards_series)
             rec_rewards_series = np.array(rec_rewards_series)
             # compute mean and std dev at each time step
             base_mean = np.mean(base_rewards_series, axis=0)
             base_std = np.std(base_rewards_series, axis=0, ddof=1)
+            last_mean = np.mean(last_base_rewards_series, axis=0)
+            last_std = np.std(last_base_rewards_series, axis=0, ddof=1)
             rec_mean = np.mean(rec_rewards_series, axis=0)
             rec_std = np.std(rec_rewards_series, axis=0, ddof=1)
             optimal_mean = np.mean(optimal_rewards_series, axis=0)
             optimal_std = np.std(optimal_rewards_series, axis=0, ddof=1)
             plt.figure(figsize=(10,6))
-            plt.plot(idx, base_mean, label='Static', marker='o')
+            plt.plot(idx, base_mean, label='static', marker='o')
             plt.fill_between(idx, base_mean - base_std, base_mean + base_std, alpha=0.2)
-            plt.plot(idx, rec_mean, label='Sequential')
+            plt.plot(idx, rec_mean, label='sequential', marker='o')
             plt.fill_between(idx, rec_mean - rec_std, rec_mean + rec_std, alpha=0.2)
-            plt.plot(idx, optimal_mean, label='Oracle', marker='o')
+            plt.plot(idx, optimal_mean, label='oracle', marker='o')
             plt.fill_between(idx, optimal_mean - optimal_std, optimal_mean + optimal_std, alpha=0.2)
+            plt.plot(idx, last_mean, label='roll-forward', marker='o')
+            plt.fill_between(idx, last_mean - last_std, last_mean + last_std, alpha=0.2)
             plt.xlabel('Time Period')
             plt.ylabel('Cumulative Revenue')
             # make y-axis be in scientific notation
